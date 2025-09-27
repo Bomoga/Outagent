@@ -22,4 +22,5 @@ uvicorn
 fastapi
 pytest
 pytest-asyncio
-requests-mockjoblib
+requests-mock
+joblib
