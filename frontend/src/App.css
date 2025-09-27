@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Bebas";
+  src: url(../src/assets/Fonts/BebasNeue-Regular.ttf);
+}
+
+.header{
+  font-family: "Bebas";
+  letter-spacing: 5px;
+}
+
+body{
+  background-color: black !important;
+}
+
+.maps{
+  height: 100%;
+  width: 100%;
+}
