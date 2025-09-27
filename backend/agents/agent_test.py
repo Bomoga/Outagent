@@ -96,12 +96,13 @@ async def main() -> None:
     for event in queue.events:
         print(type(event).__name__, getattr(event, "task_id", None))
         if hasattr(event, "body"):
-            for part in event.oarts:
+            for part in event.parts:
                 root = part.root
                 if hasattr(root, "data"):
                     forecast = root.data.get("forecast")
                     if forecast:
                         print("Forecast payload:", forecast)
+                        print("Risk scores: ", [entry["risk_score"] for entry in forecast])
 
     await agent.shutdown(forecast_ctx)
 
