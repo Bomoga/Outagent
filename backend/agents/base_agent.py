@@ -144,6 +144,70 @@ class BaseAgent(AgentExecutor, abc.ABC):
     async def tick(self, ctx: RequestContext) -> None:
         """Override for periodic activities (optional)."""
 
+    def send_command(
+        self,
+        ctx: RequestContext,
+        recipient: str,
+        command: str,
+        payload: BaseModel,
+        *,
+        correlation_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        context_id: Optional[str] = None,
+    ) -> None:
+        """Dispatch a command payload to another agent via the runtime context."""
+
+        send_method = getattr(ctx, "send", None)
+        if send_method is None:
+            self.logger.warning(
+                "context_send_unavailable",
+                recipient=recipient,
+                command=command,
+            )
+            return
+
+        base_message = getattr(ctx, "message", None)
+        resolved_task_id = (
+            task_id
+            or getattr(ctx, "task_id", None)
+            or (base_message.task_id if base_message else None)
+            or str(uuid.uuid4())
+        )
+        resolved_context_id = (
+            context_id
+            or getattr(ctx, "context_id", None)
+            or (base_message.context_id if base_message else None)
+            or str(uuid.uuid4())
+        )
+
+        message = Message(
+            message_id=str(uuid.uuid4()),
+            role=Role.agent,
+            parts=[
+                Part(
+                    root=DataPart(
+                        data={
+                            "type": command,
+                            "payload": payload.model_dump(exclude_none=True),
+                        }
+                    )
+                )
+            ],
+            task_id=resolved_task_id,
+            context_id=resolved_context_id,
+        )
+
+        send_method(
+            target_agent=recipient,
+            message=message,
+            correlation_id=correlation_id,
+        )
+        self.logger.info(
+            "dispatched_command",
+            recipient=recipient,
+            command=command,
+        )
+
     async def send_text_response(
         self,
         event_queue: EventQueue,

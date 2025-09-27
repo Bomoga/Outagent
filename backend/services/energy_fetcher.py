@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import httpx
@@ -12,8 +12,11 @@ import pandas as pd
 
 EIA_BASE_URL = "https://api.eia.gov/v2/electricity/rto/region-data/data/"
 
+
 @dataclass(slots=True)
 class EIAQuery:
+    """Encapsulates parameters for an EIA region-data request."""
+
     api_key: str
     frequency: str
     respondent: str
@@ -62,7 +65,8 @@ async def fetch_eia_timeseries(
     delay_seconds: float = 0.0,
     additional_facets: Optional[Dict[str, Sequence[str]]] = None,
 ) -> pd.DataFrame:
-    
+    """Retrieve EIA region data into a dataframe."""
+
     query = EIAQuery(
         api_key=api_key,
         frequency=frequency,
@@ -123,6 +127,7 @@ def clean_eia_timeseries(
     interpolate_method: str = "time",
     fill_limit: Optional[int] = None,
 ) -> pd.DataFrame:
+    """Clean raw EIA data by removing negatives/outliers and enforcing hourly cadence."""
 
     if df.empty:
         return df
@@ -133,24 +138,30 @@ def clean_eia_timeseries(
         cleaned[value_column] = pd.to_numeric(cleaned[value_column], errors="coerce")
         cleaned.loc[cleaned[value_column] < 0, value_column] = np.nan
 
+    if period_column in cleaned.columns:
+        cleaned[period_column] = pd.to_datetime(cleaned[period_column], errors="coerce", utc=True)
+        cleaned = cleaned.dropna(subset=[period_column])
+        cleaned = cleaned.sort_values(period_column)
+        cleaned = cleaned.drop_duplicates(subset=period_column, keep="last")
+        cleaned = cleaned.set_index(period_column)
+        cleaned = cleaned.sort_index()
+        cleaned = cleaned[~cleaned.index.duplicated(keep="last")]
+        cleaned = cleaned.asfreq("1h")
+
+    if value_column in cleaned.columns:
         mean = cleaned[value_column].mean()
         std = cleaned[value_column].std()
         if std and not np.isnan(std):
             z_scores = (cleaned[value_column] - mean) / std
             cleaned.loc[abs(z_scores) > z_score_threshold, value_column] = np.nan
 
-    if period_column in cleaned.columns:
-        cleaned[period_column] = pd.to_datetime(cleaned[period_column], errors="coerce")
-        cleaned = cleaned.dropna(subset=[period_column])
-        cleaned = cleaned.sort_values(period_column)
-        cleaned = cleaned.drop_duplicates(subset=period_column, keep="last")
-        cleaned = cleaned.set_index(period_column)
-
-    if value_column in cleaned.columns and interpolate_method:
-        cleaned[value_column] = cleaned[value_column].interpolate(
-            method=interpolate_method, limit=fill_limit
-        )
+        if interpolate_method:
+            cleaned[value_column] = cleaned[value_column].interpolate(
+                method=interpolate_method, limit=fill_limit
+            )
         cleaned[value_column] = cleaned[value_column].ffill().bfill()
+        cleaned = cleaned.dropna(subset=[value_column])
+        cleaned[value_column] = cleaned[value_column].astype(float)
 
     return cleaned
 
@@ -161,6 +172,7 @@ def engineer_energy_features(
     value_column: str = "value",
     window_sizes: Sequence[int] = (3, 6, 12, 24),
 ) -> pd.DataFrame:
+    """Derive simple demand features (rolling stats, ramps, seasonal indices)."""
 
     if df.empty:
         return df
@@ -173,15 +185,17 @@ def engineer_energy_features(
             rolling = features[value_column].rolling(window=window)
             features[f"{value_column}_roll_mean_{window}"] = rolling.mean()
             features[f"{value_column}_roll_std_{window}"] = rolling.std()
-        daily = features.index.to_series().dt.hour
-        features[f"{value_column}_by_hour"] = features.groupby(daily)[value_column].transform("mean")
+        hourly_mean = features.groupby(features.index.hour)[value_column].transform("mean")
+        features[f"{value_column}_hourly_baseline"] = hourly_mean
 
     features = features.replace({np.inf: np.nan, -np.inf: np.nan})
-    features = features.fillna(method="ffill").fillna(method="bfill")
+    features = features.ffill().bfill()
     return features
 
 
 def _ensure_timestamp_str(value: datetime | str) -> str:
     if isinstance(value, datetime):
+        value = value.astimezone(UTC)
         return value.strftime("%Y-%m-%dT%H")
     return value
+

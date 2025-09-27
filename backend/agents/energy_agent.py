@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill, TaskState
 
 from backend.agents.base_agent import AgentConfig, BaseAgent
+from backend.agents.messages import EnergyHistoryReadyPayload
 from backend.services import energy_fetcher
 
 
@@ -32,6 +34,7 @@ class EnergyAgentConfig(AgentConfig):
     default_lookback_hours: int = 168
     default_page_size: int = 5000
     default_max_rows: int = 168
+    history_cache_dir: Path = Path("data/processed/eia")
 
 
 class FetchEnergyPayload(BaseModel):
@@ -51,6 +54,18 @@ class FetchEnergyPayload(BaseModel):
     interpolate_method: str = "time"
     max_rows: Optional[int] = None
     additional_facets: Optional[Dict[str, List[str]]] = None
+
+
+class FetchEnergyHistoryPayload(BaseModel):
+    """Request payload for fetching and caching long-term energy history."""
+
+    respondent: str = "FPL"
+    start_time: datetime = datetime(2019, 1, 1, tzinfo=UTC)
+    end_time: datetime = datetime(2025, 9, 25, 23, tzinfo=UTC)
+    metrics: List[str] = Field(default_factory=lambda: ["value"])
+    frequency: str = "hourly"
+    type_filter: Optional[str] = "D"
+    cache_filename: Optional[str] = None
 
 
 class ForecastEnergyPayload(BaseModel):
@@ -96,6 +111,12 @@ class EnergyAgent(BaseAgent):
                     tags=["energy", "data-ingestion", "eia"],
                 ),
                 AgentSkill(
+                    id="energy.fetch_history",
+                    name="Fetch historical energy demand",
+                    description="Download and cache long-term balancing-authority demand history.",
+                    tags=["energy", "history", "eia"],
+                ),
+                AgentSkill(
                     id="energy.forecast",
                     name="Energy outage forecast",
                     description="Generate short-term outage risk indicators using recent energy features.",
@@ -107,6 +128,7 @@ class EnergyAgent(BaseAgent):
     async def bootstrap(self, ctx) -> None:
         self.logger.info("energy_agent_bootstrap")
         cfg = self.energy_config
+        cfg.history_cache_dir.mkdir(parents=True, exist_ok=True)
         self._api_key = cfg.eia_api_key or os.getenv(cfg.eia_api_key_env_var)
         if not self._api_key:
             self.logger.warning(
@@ -180,6 +202,8 @@ class EnergyAgent(BaseAgent):
                 )
                 if payload.include_features:
                     features_preview = features_df
+                if features_df is not None:
+                    features_df = features_df.dropna(subset=[value_column], how="any")
             else:
                 features_df = None
 
@@ -199,8 +223,8 @@ class EnergyAgent(BaseAgent):
                     "respondent": respondent,
                     "raw_rows": int(raw_df.shape[0]),
                     "clean_rows": int(clean_df.shape[0]) if clean_df is not None else 0,
-                    "period_start": window_start.strftime("%Y-%m-%dT%H"),
-                    "period_end": window_end.strftime("%Y-%m-%dT%H"),
+                    "period_start": window_start.isoformat(),
+                    "period_end": window_end.isoformat(),
                     "raw_preview": _df_to_records(raw_df, max_rows),
                     "clean_preview": _df_to_records(clean_df, max_rows),
                     "feature_preview": _df_to_records(features_preview, max_rows),
@@ -217,6 +241,83 @@ class EnergyAgent(BaseAgent):
             state=TaskState.completed,
         )
 
+    @BaseAgent.message_handler("energy.fetch_history", payload_model=FetchEnergyHistoryPayload)
+    async def handle_fetch_energy_history(
+        self,
+        ctx,
+        event_queue,
+        payload: FetchEnergyHistoryPayload,
+        message,
+    ) -> None:
+        cfg = self.energy_config
+        api_key = self._api_key or cfg.eia_api_key or os.getenv(cfg.eia_api_key_env_var)
+        if not api_key:
+            await self.send_error(event_queue, ctx, "EIA API key is not configured.")
+            return
+
+        respondent = payload.respondent
+        value_column = payload.metrics[0] if payload.metrics else "value"
+        start = payload.start_time.astimezone(UTC)
+        end = payload.end_time.astimezone(UTC)
+
+        await self.send_status_update(
+            event_queue,
+            ctx,
+            state=TaskState.working,
+            status_message=f"Fetching historical demand for {respondent}.",
+        )
+
+        raw_df = await energy_fetcher.fetch_eia_timeseries(
+            client=self.http_client,
+            api_key=api_key,
+            frequency=payload.frequency,
+            respondent=respondent,
+            start=start,
+            end=end,
+            metrics=payload.metrics,
+            type_filter=payload.type_filter,
+        )
+
+        clean_df = energy_fetcher.clean_eia_timeseries(raw_df, value_column=value_column)
+        if clean_df.empty:
+            await self.send_error(event_queue, ctx, f"No data returned for {respondent}.")
+            return
+
+        clean_df = clean_df.loc[start:end]
+        clean_df = clean_df.sort_index()
+
+        cache_dir = cfg.history_cache_dir
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        filename = payload.cache_filename or (
+            f"{respondent.lower()}_hourly_demand_{start:%Y%m%d%H}_{end:%Y%m%d%H}.csv"
+        )
+        cache_path = cache_dir / filename
+        export_df = clean_df.reset_index().rename(columns={clean_df.index.name or "index": "period"})
+        export_df.to_csv(cache_path, index=False)
+
+        summary = EnergyHistoryReadyPayload(
+            respondent=respondent,
+            cache_path=str(cache_path),
+            rows=int(export_df.shape[0]),
+            start=export_df["period"].min().to_pydatetime(),
+            end=export_df["period"].max().to_pydatetime(),
+        )
+
+        await self.send_data_response(
+            event_queue,
+            ctx,
+            data=summary.model_dump(exclude_none=True),
+            text=f"Historical demand cached at {cache_path}.",
+            state=TaskState.completed,
+        )
+
+        self.send_command(
+            ctx,
+            recipient="risk-agent",
+            command="energy.history.ready",
+            payload=summary,
+        )
+
     @BaseAgent.message_handler("energy.forecast", payload_model=ForecastEnergyPayload)
     async def handle_energy_forecast(self, ctx, event_queue, payload: ForecastEnergyPayload, message) -> None:
         cached = self._feature_cache.get(payload.respondent)
@@ -230,9 +331,13 @@ class EnergyAgent(BaseAgent):
 
         features = cached.frame
         value_column = cached.value_column
-        latest_timestamp = features.index.max()
+        series = features[value_column].dropna()
+        latest_timestamp = series.index.max()
         if isinstance(latest_timestamp, pd.Timestamp):
-            latest_ts_str = latest_timestamp.tz_localize(None).isoformat()
+            latest_ts = latest_timestamp
+            if latest_ts.tzinfo is not None:
+                latest_ts = latest_ts.tz_convert(None)
+            latest_ts_str = latest_ts.isoformat()
         else:
             latest_ts_str = str(latest_timestamp)
 
@@ -262,8 +367,16 @@ class EnergyAgent(BaseAgent):
         return self.energy_config.default_balancing_authorities
 
     def _resolve_window(self, payload: FetchEnergyPayload) -> tuple[datetime, datetime]:
-        end = payload.end_time or datetime.utcnow()
+        end = payload.end_time or datetime.now(UTC)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=UTC)
+        else:
+            end = end.astimezone(UTC)
         start = payload.start_time or (end - timedelta(hours=self.energy_config.default_lookback_hours))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        else:
+            start = start.astimezone(UTC)
         return start, end
 
 
@@ -279,16 +392,15 @@ def _df_to_records(df: Optional[pd.DataFrame], limit: Optional[int]) -> List[Dic
 
 
 def _calculate_simple_risk_score(features: pd.DataFrame, value_column: str = "value") -> float:
-    if features.empty:
+    if features.empty or value_column not in features.columns:
         return 0.0
-    diff_col = f"{value_column}_diff"
-    latest_diff = float(abs(features[diff_col].iloc[-1])) if diff_col in features.columns else 0.0
-    if value_column in features.columns:
-        baseline = float(abs(features[value_column].iloc[-1])) or 1.0
-    else:
-        baseline = 1.0
+    series = features[value_column].dropna()
+    if series.empty:
+        return 0.0
+    diffs = series.diff().dropna()
+    latest_diff = float(abs(diffs.iloc[-1])) if not diffs.empty else 0.0
+    baseline = float(abs(series.iloc[-1])) or 1.0
     ratio = min(latest_diff / max(baseline, 1.0), 1.0)
     return round(ratio, 3)
-
 
 
