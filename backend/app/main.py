@@ -187,14 +187,25 @@ def ingest_hour(obs: Observation):
         df = pd.DataFrame(columns=[
             "timestamp","load_mw","temp_c","rh","wind_mps","precip_mm","ghi_kwhm2"
         ])
+    try:
+        ts = pd.to_datetime(obs.timestamp, utc=True, errors="raise")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="timestamp must be an ISO 8601 datetime string (e.g. 2025-09-28T00:00:00Z)",
+        ) from exc
+
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert(None)
+
     row = {
-        "timestamp": pd.to_datetime(obs.timestamp),
+        "timestamp": ts,
         "load_mw": obs.load_mw,
         "temp_c": obs.temp_c,
         "rh": obs.rh,
         "wind_mps": obs.wind_mps,
         "precip_mm": obs.precip_mm,
-        "ghi_kwhm2": obs.ghi_kwhm2
+        "ghi_kwhm2": obs.ghi_kwhm2,
     }
     df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
