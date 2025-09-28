@@ -3,7 +3,9 @@ import pandas as pd
 import numpy as np
 import math
 import logging
+import sys
 from pathlib import Path
+from typing import Optional
 
 from backend.settings import get_settings
 
@@ -367,6 +369,39 @@ def interpolate_weather_at(ts: pd.Timestamp) -> dict:
 # -----------------------
 LOGGER = logging.getLogger(__name__)
 
+_DIRECT_INGEST_CACHE: Optional[tuple] = None
+_DIRECT_INGEST_DISABLED = False
+
+
+def _try_ingest_via_app(payload: dict) -> Optional[bool]:
+    global _DIRECT_INGEST_CACHE, _DIRECT_INGEST_DISABLED
+    if _DIRECT_INGEST_DISABLED:
+        return None
+    if 'backend.app.main' not in sys.modules:
+        _DIRECT_INGEST_DISABLED = True
+        return None
+    if _DIRECT_INGEST_CACHE is None:
+        try:
+            from backend.app.main import Observation, ingest_hour
+        except Exception:
+            _DIRECT_INGEST_DISABLED = True
+            LOGGER.debug('backend.app.main unavailable for direct ingest; falling back to HTTP.', exc_info=True)
+            return None
+        _DIRECT_INGEST_CACHE = (Observation, ingest_hour)
+    Observation, ingest_hour = _DIRECT_INGEST_CACHE
+    try:
+        if hasattr(Observation, 'model_validate'):
+            obs = Observation.model_validate(payload)  # type: ignore[attr-defined]
+        elif hasattr(Observation, 'parse_obj'):
+            obs = Observation.parse_obj(payload)  # type: ignore[attr-defined]
+        else:
+            obs = Observation(**payload)
+    except Exception:
+        LOGGER.exception('Observation payload failed validation for in-process ingest.')
+        return False
+    ingest_hour(obs)
+    return True
+
 
 def ingest_once() -> bool:
     """Run the hourly ingest pipeline once. Returns True when data was appended."""
@@ -407,6 +442,14 @@ def ingest_once() -> bool:
         "ghi_kwhm2": wx_row["ghi_kwhm2"],
     }
 
+    dispatched = _try_ingest_via_app(payload)
+    if dispatched is True:
+        LOGGER.info("Ingested hourly observation for %s (in-process)", ts.isoformat())
+        return True
+    if dispatched is False:
+        LOGGER.warning("Skipping ingest for %s; payload failed validation.", ts.isoformat())
+        return False
+
     response = requests.post(f"{API_BASE}/ingest/hour", json=payload, timeout=20)
     response.raise_for_status()
     LOGGER.info("Ingested hourly observation for %s", ts.isoformat())
@@ -423,3 +466,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
