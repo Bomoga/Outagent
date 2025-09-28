@@ -44,6 +44,7 @@ def _get_int(name: str, default: int) -> int:
 class Settings:
     api_base: str
     eia_api_key: str
+    gemini_api_key: str
     wx_lat: float
     wx_lon: float
     ingest_interval_seconds: int
@@ -56,6 +57,7 @@ def get_settings() -> Settings:
     return Settings(
         api_base=os.getenv("OUTAGENT_API_BASE", "http://127.0.0.1:8000"),
         eia_api_key=_require_env("EIA_API_KEY"),
+        gemini_api_key=_require_env("GEMINI_API_KEY"),
         wx_lat=_get_float("WX_LAT", 26.5225),
         wx_lon=_get_float("WX_LON", -81.1637),
         ingest_interval_seconds=_get_int("OUTAGENT_INGEST_INTERVAL", 3600),

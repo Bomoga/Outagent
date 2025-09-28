@@ -7,11 +7,20 @@ from joblib import load
 import pandas as pd
 from typing import List, Dict
 from pydantic import BaseModel
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, JSONResponse
+
+try:
+    import orjson  # type: ignore # noqa: F401
+    DefaultResponse = ORJSONResponse
+except ImportError:
+    DefaultResponse = JSONResponse
+    logging.getLogger('backend.app.main').warning("orjson not installed; falling back to JSONResponse. Install 'orjson' for best performance.")
+
 from fastapi import APIRouter
 from .weather_infer import forecast_weather
 from backend.app import ingest_hourly
 from backend.settings import get_settings
+from . import risk
 
 
 CACHE = Path("backend/data/processed/latest/latest_features.parquet")
@@ -29,7 +38,7 @@ class Observation(BaseModel):
     ghi_kwhm2: float
 
 router = APIRouter()
-app = FastAPI(default_response_class=ORJSONResponse)
+app = FastAPI(default_response_class=DefaultResponse)
 
 LOGGER = logging.getLogger(__name__)
 settings = get_settings()
@@ -224,4 +233,5 @@ def forecast_weather_api(hours: int = 12):
     hours = max(1, min(24, hours))
     return forecast_weather(hours=hours)
 
+app.include_router(risk.router)
 app.include_router(router)

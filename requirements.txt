@@ -28,3 +28,4 @@ lightgbm
 python-dotenv
 mapbox-vector-tile
 mercantile
+google.generativeai
