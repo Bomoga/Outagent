@@ -1,4 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
+
+type ChartsProps = {
+  selectedMetric: string;
+  setSelectedMetric: React.Dispatch<React.SetStateAction<string>>;
+  hours?: string[];
+};
 
 type Series = {
   key: string;
@@ -24,15 +30,14 @@ function LineChart({
   width = 560,
   height,
 }: LineChartProps) {
-  const calculatedHeight = height ?? 0; // we’ll set the SVG height to 100% when height is undefined
+  const calculatedHeight = height ?? 0;
 
   const plot = useMemo(() => {
-    // If no fixed height provided, use a reasonable fallback for calculations (300px)
     const chartHeight = calculatedHeight || 300;
     const innerW = width - MARGIN.left - MARGIN.right;
     const innerH = chartHeight - MARGIN.top - MARGIN.bottom;
 
-    const allValues = series.flatMap((s) => s.values);
+    const allValues = series.flatMap((s) => s.values.filter((v) => !isNaN(v)));
     let yMin = Math.min(...allValues);
     let yMax = Math.max(...allValues);
     if (!isFinite(yMin) || !isFinite(yMax)) {
@@ -53,7 +58,10 @@ function LineChart({
     const polylines = series.map((s) => ({
       key: s.key,
       color: s.color,
-      points: s.values.map((v, i) => `${x(i)},${y(v)}`).join(" "),
+      points: s.values
+        .map((v, i) => (isNaN(v) ? null : `${x(i)},${y(v)}`))
+        .filter(Boolean)
+        .join(" "),
     }));
 
     const ticks = 5;
@@ -86,9 +94,10 @@ function LineChart({
       <div className="text-gray-900 font-semibold mb-2 text-base sm:text-lg">
         {title}
       </div>
+
       <svg
         width="100%"
-        height="100%" // fill parent height if no height provided
+        height="100%"
         viewBox={`0 0 ${width} ${plot.chartHeight}`}
         preserveAspectRatio="none"
         role="img"
@@ -158,116 +167,136 @@ function LineChart({
             fill="none"
             stroke={p.color}
             strokeWidth={2}
+            strokeDasharray={p.key.includes("predicted") ? "6 4" : "none"} // dashed if predicted
             strokeLinejoin="round"
             strokeLinecap="round"
             points={p.points}
           />
         ))}
       </svg>
+
+      {/* Legend */}
+      <div className="mt-2 flex gap-4 text-xs text-gray-700">
+        {series.map((s) => (
+          <div key={s.key} className="flex items-center gap-2">
+            <span
+              className="inline-block w-4 h-1 rounded"
+              style={{
+                backgroundColor: s.color,
+                borderBottom: s.key.includes("predicted")
+                  ? "1px dashed " + s.color
+                  : "none",
+              }}
+            />
+            {s.label}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
 const COLORS = ["#2563eb", "#16a34a", "#dc2626", "#f59e0b"];
 
-function generateHours(len: number) {
-  return Array.from({ length: len }, (_, i) => `${i}:00`);
-}
 
-export type ChartsProps = {
-  hours?: string[];
-  weatherSeries?: Series[];
-  powerSeries?: Series[];
-};
 
-const Charts = ({
-  hours: hoursProp,
-}: ChartsProps) => {
-  const hours = hoursProp ?? generateHours(24);
+const Charts = ({ selectedMetric, setSelectedMetric, hours: hoursProp }: ChartsProps) => {
+  // Build 24h + 12h prediction timeline
+  const hours = hoursProp ?? [
+    ...Array.from({ length: 24 }, (_, i) => `${i}:00`),
+    ...Array.from({ length: 12 }, (_, i) => `+${i + 1}h`)
+  ];
 
+  // Weather Series
   const defaultWeather: Series[] = [
     {
       key: "Insulation",
       label: "Insulation",
       color: COLORS[0],
-      values: hours.map((_, i) => +(12 + Math.sin(i / 2) * 3).toFixed(2)),
+      values: hours.slice(0, 24).map((_, i) => +(12 + Math.sin(i / 2) * 3).toFixed(2)),
     },
     {
       key: "Windspeed",
       label: "Windspeed",
       color: COLORS[1],
-      values: hours.map((_, i) => +(6 + Math.cos(i / 3) * 2).toFixed(2)),
+      values: hours.slice(0, 24).map((_, i) => +(6 + Math.cos(i / 3) * 2).toFixed(2)),
     },
     {
-      key: "Pecipitation",
+      key: "Precipitation",
       label: "Precipitation",
       color: COLORS[2],
-      values: hours.map((_, i) => +Math.max(0, Math.sin(i / 4) * 2).toFixed(2)),
+      values: hours.slice(0, 24).map((_, i) => +Math.max(0, Math.sin(i / 4) * 2).toFixed(2)),
     },
     {
       key: "Wet Bulb/2m",
       label: "Wet Bulb @2m",
       color: COLORS[3],
-      values: hours.map((_, i) => +(8 + Math.sin(i / 2.5) * 1.5).toFixed(2)),
+      values: hours.slice(0, 24).map((_, i) => +(8 + Math.sin(i / 2.5) * 1.5).toFixed(2)),
     },
   ];
 
-  const defaultPower: Series[] = [
-    {
-      key: "mwh",
-      label: "MW per Hour",
-      color: COLORS[0],
-      values: hours.map((_, i) => +(50 + Math.sin(i / 3) * 15).toFixed(2)),
-    },
-  ];
-
-  const [selectedMetric, setSelectedMetric] = useState<string>(
-    defaultWeather[0].key
+  // Power Series (Actual + Predicted)
+  const actualValues = Array.from({ length: 24 }, (_, i) =>
+    +(50 + Math.sin(i / 3) * 15).toFixed(2)
   );
+  const predictedValues = Array.from({ length: 12 }, (_, i) =>
+    +(55 + Math.sin((i + 24) / 3) * 12).toFixed(2)
+  );
+
+  const powerSeries: Series[] = [
+    {
+      key: "mwh-actual",
+      label: "Actual Demand",
+      color: "#2563eb",
+      values: [...actualValues, ...Array(12).fill(NaN)],
+    },
+    {
+      key: "mwh-predicted",
+      label: "Predicted Demand",
+      color: "#2563eb",
+      values: [...Array(24).fill(NaN), ...predictedValues],
+    },
+  ];
 
   const selectedSeries = defaultWeather.filter((s) => s.key === selectedMetric);
 
   return (
     <div className="flex flex-col gap-6 h-full">
-  {/* Weather Card */}
-  <div className="h-[calc(50%-0.75rem)] bg-gray-50 rounded-xl p-4 sm:p-6 shadow-lg flex flex-col">
-    <h2 className="text-lg font-semibold text-gray-900 mb-3">Weather Metrics</h2>
-    <div className="flex flex-wrap gap-2 mb-4">
-      {defaultWeather.map((s) => (
-        <button
-          key={s.key}
-          onClick={() => setSelectedMetric(s.key)}
-          className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
-            selectedMetric === s.key
-              ? "bg-blue-600 text-white shadow"
-              : "bg-white text-gray-700 border border-gray-300 hover:bg-gray-100"
-          }`}
-        >
-          {s.label}
-        </button>
-      ))}
-    </div>
-    {/* Chart fills remaining space */}
-    <div className="flex-1">
-      <LineChart
-        title={`Weather: ${selectedMetric}`}
-        series={selectedSeries}
-        xLabels={hours}
-        height={200}
-      />
-    </div>
-  </div>
-
-
-      {/* Power Card */}
-  <div className="h-[calc(50%-0.75rem)] bg-gray-50 rounded-xl p-4 sm:p-6 shadow-lg flex flex-col">
-        <h2 className="text-lg font-semibold text-gray-900 mb-3">
-          Power Output
-        </h2>
+      {/* Weather Card */}
+      <div className="h-[calc(50%-0.75rem)] bg-gray-50 rounded-xl p-4 sm:p-6 shadow-lg flex flex-col">
+        <h2 className="text-lg font-semibold text-gray-900 mb-3">Weather Metrics</h2>
+        <div className="flex flex-wrap gap-2 mb-4">
+          {defaultWeather.map((s) => (
+            <button
+              key={s.key}
+              onClick={() => setSelectedMetric(s.key)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${
+                selectedMetric === s.key
+                  ? "bg-blue-600 text-white shadow"
+                  : "bg-white text-gray-700 border border-gray-300 hover:bg-gray-100"
+              }`}
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
         <div className="flex-1">
           <LineChart
-            title="MW per Hour"
-            series={defaultPower}
+            title={`Weather: ${selectedMetric}`}
+            series={selectedSeries}
+            xLabels={hours.slice(0, 24)}
+            height={200}
+          />
+        </div>
+      </div>
+
+      {/* Power Card with Predictions */}
+      <div className="h-[calc(50%-0.75rem)] bg-gray-50 rounded-xl p-4 sm:p-6 shadow-lg flex flex-col">
+        <h2 className="text-lg font-semibold text-gray-900 mb-3">Power Output</h2>
+        <div className="flex-1">
+          <LineChart
+            title="MW per Hour (24h + 12h Prediction)"
+            series={powerSeries}
             xLabels={hours}
             height={250}
           />
