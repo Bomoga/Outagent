@@ -5,8 +5,11 @@ import pandas as pd
 from typing import List, Dict
 from pydantic import BaseModel
 from fastapi.responses import ORJSONResponse
+from fastapi import APIRouter
+from .weather_infer import forecast_weather
 
-CACHE = Path("backend/data/latest/latest_features.parquet")
+
+CACHE = Path("backend/data/processed/latest/latest_features.parquet")
 DATA = Path("backend/data/processed/merged/merged_hourly.parquet")
 MODELS_DIR = Path("backend/models/demand")
 HORIZONS = list(range(1, 13))  # trained horizons
@@ -20,6 +23,7 @@ class Observation(BaseModel):
     precip_mm: float
     ghi_kwhm2: float
 
+router = APIRouter()
 app = FastAPI(default_response_class=ORJSONResponse)
 
 # Feature engineering (must match training)
@@ -162,3 +166,10 @@ def ingest_hour(obs: Observation):
     latest.to_parquet(CACHE, index=False)
 
     return {"ok": True, "rows": int(len(df))}
+
+@router.get("/forecast/weather")
+def forecast_weather_api(hours: int = 12):
+    hours = max(1, min(24, hours))
+    return forecast_weather(hours=hours)
+
+app.include_router(router)
