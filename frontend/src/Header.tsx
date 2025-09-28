@@ -1,4 +1,3 @@
-import React from "react";
 import logo from "./assets/Images/logo.png";
 
 const Header = () => {
@@ -7,7 +6,7 @@ const Header = () => {
       <img
         src={logo}
         alt="Outagent logo"
-        className="h-20 w-auto drop-shadow-md"
+        className="h-30 w-auto drop-shadow-md"
       />
 
       {/* Title + Subtitle */}
