@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+.env
+.env.example
+
+# Environment
+.env
+# Keep .env.example tracked for others to use
+
+# Data & model artifacts (optional)
+*.parquet
+*.csv
+
+# OS-specific
+.DS_Store
+Thumbs.db

@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import {
   GoogleMap,
   LoadScript,
@@ -11,80 +11,155 @@ type MapProps = {
   selectedMetric: string;
 };
 
+type WeatherData = {
+  timestamps: string[];
+  ghi_kwhm2: number[];
+  wind_mps: number[];
+  wind_dir_deg: number[];
+  precip_mm: number[];
+  wet_bulb: number[];
+};
+
+type WeatherForecast = {
+  horizon_hours: number[];
+  pred: {
+    ghi_kwhm2?: number[];
+    wind_mps?: number[];
+    wind_dir_deg?: number[];
+    precip_mm?: number[];
+    wet_bulb?: number[];
+  };
+};
+
 const containerStyle = { width: "100%", height: "100%" };
-const center = { lat: 26.1, lng: -80.2 }; // Centered roughly over South Florida
+const center = { lat: 26.1, lng: -80.2 };
 const LIBRARIES: ("visualization")[] = ["visualization"];
 
-// 🌧 Precipitation data: distributed across several South FL cities
-const precipitationData = [
-  { id: 1, lat: 25.7617, lng: -80.1918, value: 12 }, // Miami
-  { id: 2, lat: 26.1224, lng: -80.1373, value: 6 },  // Fort Lauderdale
-  { id: 3, lat: 26.7153, lng: -80.0534, value: 10 }, // West Palm Beach
-  { id: 4, lat: 25.4687, lng: -80.4776, value: 15 }, // Homestead
-  { id: 5, lat: 26.3587, lng: -80.0831, value: 8 },  // Boca Raton
-  { id: 6, lat: 25.0865, lng: -80.4473, value: 20 }, // Key Largo
-  { id: 7, lat: 26.0112, lng: -80.1495, value: 5 },  // Hollywood
-];
-
-// 💨 Windspeed data with directions
-const windData = [
-  { id: 1, lat: 25.7617, lng: -80.1918, value: 12, direction: 90 },
-  { id: 2, lat: 26.1224, lng: -80.1373, value: 18, direction: 45 },
-  { id: 3, lat: 26.7153, lng: -80.0534, value: 8, direction: 135 },
-  { id: 4, lat: 25.4687, lng: -80.4776, value: 15, direction: 200 },
-  { id: 5, lat: 26.3587, lng: -80.0831, value: 10, direction: 300 },
-  { id: 6, lat: 26.2712, lng: -80.2706, value: 16, direction: 120 }, // Coral Springs
-];
-
-// 🔆 Insulation data (dense for heatmap effect)
-const insulationData = [
-  { lat: 25.7617, lng: -80.1918 },
-  { lat: 26.1224, lng: -80.1373 },
-  { lat: 26.7153, lng: -80.0534 },
-  { lat: 25.4687, lng: -80.4776 },
-  { lat: 26.3587, lng: -80.0831 },
-  { lat: 25.0865, lng: -80.4473 },
-  { lat: 26.0112, lng: -80.1495 },
-  { lat: 26.2712, lng: -80.2706 },
-  { lat: 26.1420, lng: -81.7948 }, // Naples
-];
-
-// 🌡 Wet Bulb Data
-const wetBulbData = [
-  { id: 1, lat: 25.7617, lng: -80.1918, value: 26 },
-  { id: 2, lat: 26.1224, lng: -80.1373, value: 30 },
-  { id: 3, lat: 26.7153, lng: -80.0534, value: 27 },
-  { id: 4, lat: 25.4687, lng: -80.4776, value: 28 },
-  { id: 5, lat: 26.3587, lng: -80.0831, value: 25 },
-  { id: 6, lat: 26.0112, lng: -80.1495, value: 29 },
-];
-
-const Map = ({ selectedMetric }: MapProps) => {
+export default function Map({ selectedMetric }: MapProps) {
   const [mapReady, setMapReady] = useState(false);
-  const handleMapLoad = useCallback(() => setMapReady(true), []);
+  const [weatherData, setWeatherData] = useState<WeatherData | null>(null);
+  const [forecast, setForecast] = useState<WeatherForecast | null>(null);
+
+  useEffect(() => {
+    async function fetchWeather() {
+      try {
+        const [histRes, forecastRes] = await Promise.all([
+          fetch("http://127.0.0.1:8000/history/weather"),
+          fetch("http://127.0.0.1:8000/forecast/weather"),
+        ]);
+        if (histRes.ok) setWeatherData(await histRes.json());
+        if (forecastRes.ok) setForecast(await forecastRes.json());
+      } catch (err) {
+        console.error("Failed to fetch weather data", err);
+      }
+    }
+    fetchWeather();
+    const interval = setInterval(fetchWeather, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleMapLoad = useCallback((map: google.maps.Map) => {
+    setMapReady(true);
+    const bounds = new window.google.maps.LatLngBounds();
+    bounds.extend({ lat: 27.5, lng: -79.5 });
+    bounds.extend({ lat: 24.3, lng: -82.5 });
+    map.fitBounds(bounds);
+  }, []);
+
+  const locations = useMemo(
+    () => [
+      { id: 1, name: "Miami", lat: 25.7617, lng: -80.1918 },
+      { id: 2, name: "Fort Lauderdale", lat: 26.1224, lng: -80.1373 },
+      { id: 3, name: "West Palm", lat: 26.7153, lng: -80.0534 },
+      { id: 4, name: "Homestead", lat: 25.4687, lng: -80.4776 },
+    ],
+    []
+  );
+
+  const currentValues = useMemo(() => {
+    if (!weatherData) return [];
+    switch (selectedMetric) {
+      case "Insulation":
+        return weatherData.ghi_kwhm2;
+      case "Windspeed":
+        return weatherData.wind_mps;
+      case "Precipitation":
+        return weatherData.precip_mm;
+      case "Wet Bulb @2m":
+        return weatherData.wet_bulb;
+      default:
+        return [];
+    }
+  }, [selectedMetric, weatherData]);
+
+  const forecastValues = useMemo(() => {
+    if (!forecast) return [];
+    switch (selectedMetric) {
+      case "Insulation":
+        return forecast.pred.ghi_kwhm2 ?? [];
+      case "Windspeed":
+        return forecast.pred.wind_mps ?? [];
+      case "Precipitation":
+        return forecast.pred.precip_mm ?? [];
+      case "Wet Bulb @2m":
+        return forecast.pred.wet_bulb ?? [];
+      default:
+        return [];
+    }
+  }, [selectedMetric, forecast]);
+
+  const currentDirections = weatherData?.wind_dir_deg ?? [];
+  const forecastDirections = forecast?.pred.wind_dir_deg ?? [];
+
+  const heatmapPoints = useMemo(() => {
+    if (!mapReady || selectedMetric !== "Insulation" || typeof window.google === "undefined")
+      return [];
+    return locations.map((p) => new window.google.maps.LatLng(p.lat, p.lng));
+  }, [mapReady, selectedMetric, locations]);
 
   return (
     <div className="bg-white rounded-xl p-4 shadow-lg h-full flex flex-col min-h-[500px]">
-      <h2 className="text-xl font-semibold text-black mb-4">South Florida Map</h2>
-      <div className="flex-1 min-h-[300px]">
+      <h2 className="text-xl font-semibold text-black mb-2">South Florida Map</h2>
+      <div className="flex-1 min-h-[300px] relative">
         <LoadScript
           googleMapsApiKey={import.meta.env.VITE_GOOGLE_MAPS_API_KEY}
           libraries={LIBRARIES}
         >
           <GoogleMap
+            key={selectedMetric}
             mapContainerStyle={containerStyle}
             center={center}
             zoom={8}
             onLoad={handleMapLoad}
+            options={{
+              restriction: {
+                latLngBounds: {
+                  north: 27.5,
+                  south: 24.3,
+                  west: -82.5,
+                  east: -79.5,
+                },
+                strictBounds: true,
+              },
+              streetViewControl: false,
+              mapTypeControl: true,
+            }}
           >
-            {mapReady && (
+            {mapReady && currentValues.length > 0 && (
               <>
+                {selectedMetric === "Insulation" && heatmapPoints.length > 0 && (
+                  <HeatmapLayerF
+                    data={heatmapPoints}
+                    options={{ radius: 40, opacity: 0.6, dissipating: true }}
+                  />
+                )}
+
                 {selectedMetric === "Precipitation" &&
-                  precipitationData.map((point) => (
+                  locations.map((loc, i) => (
                     <Circle
-                      key={point.id}
-                      center={{ lat: point.lat, lng: point.lng }}
-                      radius={point.value * 600}
+                      key={`precip-${loc.id}`}
+                      center={{ lat: loc.lat, lng: loc.lng }}
+                      radius={(currentValues[i % currentValues.length] ?? 0) * 600}
                       options={{
                         fillColor: "blue",
                         fillOpacity: 0.3,
@@ -94,57 +169,122 @@ const Map = ({ selectedMetric }: MapProps) => {
                   ))}
 
                 {selectedMetric === "Windspeed" &&
-                  windData.map((point) => (
+                  locations.map((loc, i) => (
                     <Marker
-                      key={point.id}
-                      position={{ lat: point.lat, lng: point.lng }}
+                      key={`wind-${loc.id}`}
+                      position={{ lat: loc.lat, lng: loc.lng }}
                       icon={{
-                        path: window.google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
-                        scale: 4,
-                        strokeColor: point.value > 15 ? "red" : "green",
-                        rotation: point.direction,
+                        path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                        scale: 5,
+                        fillColor: "#1e3a8a",
+                        fillOpacity: 0.9,
+                        strokeWeight: 1,
+                        rotation: currentDirections[i % currentDirections.length] ?? 0,
+                      }}
+                      label={{
+                        text: `${currentValues[i % currentValues.length]?.toFixed(1) ?? "0"} m/s`,
+                        fontSize: "12px",
+                        fontWeight: "bold",
+                        color: "#1e3a8a",
                       }}
                     />
                   ))}
 
-                {selectedMetric === "Insulation" && (
-                  <HeatmapLayerF
-                    data={insulationData.map(
-                      (p) => new window.google.maps.LatLng(p.lat, p.lng)
-                    )}
-                    options={{
-                      radius: 40,
-                      opacity: 0.6,
-                      dissipating: true,
-                    }}
-                  />
-                )}
-
-                {selectedMetric === "Wet Bulb/2m" &&
-                  wetBulbData.map((point) => (
+                {forecastValues.length > 0 &&
+                  selectedMetric === "Precipitation" &&
+                  locations.map((loc, i) => (
                     <Circle
-                      key={point.id}
-                      center={{ lat: point.lat, lng: point.lng }}
-                      radius={700}
+                      key={`precip-forecast-${loc.id}`}
+                      center={{ lat: loc.lat, lng: loc.lng }}
+                      radius={(forecastValues[i % forecastValues.length] ?? 0) * 600}
                       options={{
-                        fillColor:
-                          point.value < 24
-                            ? "green"
-                            : point.value < 28
-                            ? "orange"
-                            : "red",
-                        fillOpacity: 0.35,
-                        strokeWeight: 0,
+                        fillColor: "blue",
+                        fillOpacity: 0.15,
+                        strokeWeight: 1,
+                        strokeColor: "blue",
+                        strokeOpacity: 0.5,
+                      }}
+                    />
+                  ))}
+
+                {forecastValues.length > 0 &&
+                  selectedMetric === "Windspeed" &&
+                  locations.map((loc, i) => (
+                    <Marker
+                      key={`wind-forecast-${loc.id}`}
+                      position={{ lat: loc.lat + 0.02, lng: loc.lng }}
+                      icon={{
+                        path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+                        scale: 5,
+                        fillColor: "#3b82f6",
+                        fillOpacity: 0.5,
+                        strokeWeight: 1,
+                        rotation: forecastDirections[i % forecastDirections.length] ?? 0,
+                      }}
+                      label={{
+                        text: `${forecastValues[i % forecastValues.length]?.toFixed(1) ?? "0"} m/s`,
+                        fontSize: "11px",
+                        color: "#3b82f6",
                       }}
                     />
                   ))}
               </>
             )}
           </GoogleMap>
+
+          {/* Legend */}
+          {mapReady && (
+            <div className="absolute bottom-2 left-2 bg-white p-3 rounded-lg shadow-md text-xs text-gray-800">
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 bg-blue-500 rounded-full inline-block"></span>
+                  <span className="font-medium">Current Data</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-3 h-3 border border-blue-500 rounded-full inline-block"></span>
+                  <span className="font-medium">Forecast</span>
+                </div>
+
+                {selectedMetric === "Windspeed" && (
+                  <>
+                    <div className="flex items-center gap-2 mt-1">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="#1e3a8a">
+                        <path d="M2 12L22 12M22 12L15 5M22 12L15 19"></path>
+                      </svg>
+                      <span className="font-medium">Live Wind (direction + speed)</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <svg
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="#3b82f6"
+                        fillOpacity="0.5"
+                      >
+                        <path d="M2 12L22 12M22 12L15 5M22 12L15 19"></path>
+                      </svg>
+                      <span className="font-medium">Predicted Wind (direction + speed)</span>
+                    </div>
+                  </>
+                )}
+
+                {selectedMetric === "Precipitation" && (
+                  <div className="flex flex-col gap-1 mt-1">
+                    <div className="flex items-center gap-2">
+                      <span className="w-4 h-0.5 bg-blue-500 inline-block"></span>
+                      <span className="font-medium">Current Precipitation</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-4 h-0.5 border-t-2 border-blue-500 inline-block"></span>
+                      <span className="font-medium">Forecast Precipitation</span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </LoadScript>
       </div>
     </div>
   );
-};
-
-export default Map;
+}
