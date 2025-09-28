@@ -47,6 +47,8 @@ class Settings:
     wx_lat: float
     wx_lon: float
     ingest_interval_seconds: int
+    fema_bbox: str
+    fema_api_key: str
 
 
 @lru_cache()
@@ -57,4 +59,7 @@ def get_settings() -> Settings:
         wx_lat=_get_float("WX_LAT", 26.5225),
         wx_lon=_get_float("WX_LON", -81.1637),
         ingest_interval_seconds=_get_int("OUTAGENT_INGEST_INTERVAL", 3600),
+        fema_bbox=os.getenv("FEMA_BBOX", "-81.8,25.0,-80.0,26.5"),
+        fema_api_key=_require_env("FEMA_API_KEY"),
     )
+

@@ -1,164 +1,124 @@
-import os
-import json
-import math
-import time
-import argparse
-from datetime import datetime
 from pathlib import Path
+from functools import partial
+import math
+import sys
+from typing import Iterable, List, Tuple, Dict
 
+import geopandas as gpd
+import mercantile
+import mapbox_vector_tile
 import requests
+from shapely.geometry import shape
+from shapely.ops import transform
 
-NFHL_LAYER_URL = "https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query"
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-DEFAULT_FIELDS = ["FLD_ZONE", "ZONE_SUBTY", "SFHA_TF", "STATIC_BFE", "V_DATUM", "FLD_AR_ID"]
+from backend.settings import get_settings
 
-def _safe_filename(s: str) -> str:
-    return s.replace(" ", "_").replace(",", "_").replace(":", "_")
+API_TILES_URL = "https://api.nationalflooddata.com/v3/tiles/flood-vector/{z}/{x}/{y}.mvt"
+OUTPUT_PATH = Path("backend/data/processed/flood/floodzones_sfla.geojson")
 
-def _ensure_dir(p: Path) -> None:
-    p.mkdir(parents=True, exist_ok=True)
-
-def _tile_bounds(min_lat, min_lon, max_lat, max_lon, rows, cols):
-    """Yield (r, c, (tile_min_lat, tile_min_lon, tile_max_lat, tile_max_lon))"""
-    dlat = (max_lat - min_lat) / rows
-    dlon = (max_lon - min_lon) / cols
-    for r in range(rows):
-        for c in range(cols):
-            tmin_lat = min_lat + r * dlat
-            tmax_lat = tmin_lat + dlat
-            tmin_lon = min_lon + c * dlon
-            tmax_lon = tmin_lon + dlon
-            yield r, c, (tmin_lat, tmin_lon, tmax_lat, tmax_lon)
-
-def _fema_query_bbox(min_lat, min_lon, max_lat, max_lon, fields, page_size=2000, sleep=0.25, timeout=60):
-    out_fields = ",".join(fields) if isinstance(fields, (list, tuple)) else (fields or "*")
-
-    # ArcGIS uses envelope geometry: xmin,ymin,xmax,ymax (lon,lat order) in WGS84
-    geometry = f"{min_lon},{min_lat},{max_lon},{max_lat}"
-
-    result_offset = 0
-    all_features = []
-
-    while True:
-        params = {
-            "where": "1=1",
-            "geometry": geometry,
-            "geometryType": "esriGeometryEnvelope",
-            "inSR": 4326,
-            "outFields": out_fields,
-            "outSR": 4326,
-            "returnGeometry": "true",
-            "spatialRel": "esriSpatialRelIntersects",
-            "f": "geojson",
-            "resultOffset": result_offset,
-            "resultRecordCount": page_size,
-            "geometryPrecision": 6,
-        }
-
-        resp = requests.get(NFHL_LAYER_URL, params=params, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if "features" not in data:
-            raise RuntimeError(f"Unexpected response: {json.dumps(data)[:400]} ...")
-
-        features = data.get("features", [])
-        if not features:
-            break
-
-        all_features.extend(features)
-        result_offset += len(features)
-
-        time.sleep(sleep)
+settings = get_settings()
 
 
-        if len(features) < page_size:
-            break
+def _latlon_to_tile(lat: float, lon: float, zoom: int) -> tuple[float, float]:
+    lat = max(min(lat, 85.05112878), -85.05112878)
+    lon = ((lon + 180.0) % 360.0) - 180.0
+    n = 2.0 ** zoom
+    x = (lon + 180.0) / 360.0 * n
+    y = (1.0 - math.log(math.tan(math.radians(lat)) + 1 / math.cos(math.radians(lat))) / math.pi) / 2.0 * n
+    return x, y
 
-    return {
-        "type": "FeatureCollection",
-        "features": all_features,
-    }
 
-def _write_geojson(path: Path, feature_collection: dict) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(feature_collection, f, ensure_ascii=False)
+def _generate_tile_range(bbox: str, zoom: int) -> Iterable[Tuple[int, int]]:
+    try:
+        min_lon, min_lat, max_lon, max_lat = map(float, bbox.split(","))
+    except ValueError as exc:
+        raise ValueError(
+            "FEMA_BBOX must contain comma-separated min_lon,min_lat,max_lon,max_lat values"
+        ) from exc
 
-def _merge_feature_collections(paths):
-    merged = {"type": "FeatureCollection", "features": []}
-    for p in paths:
-        with open(p, "r", encoding="utf-8") as f:
-            gj = json.load(f)
-        merged["features"].extend(gj.get("features", []))
-    return merged
+    if min_lon > max_lon:
+        min_lon, max_lon = max_lon, min_lon
+    if min_lat > max_lat:
+        min_lat, max_lat = max_lat, min_lat
 
-def fetch_nfhl_bbox(min_lat, min_lon, max_lat, max_lon, fields=tuple(DEFAULT_FIELDS),
-                    grid_rows=1, grid_cols=1, page_size=2000, out_dir="data/raw/nfhl",
-                    prefix="bbox", dry_run=False):
-    stamp = datetime.utcnow().strftime("%Y%m%d")
-    bbox_dirname = f"{prefix}_{min_lat}_{min_lon}_{max_lat}_{max_lon}"
-    base_dir = Path(out_dir) / stamp / _safe_filename(bbox_dirname)
-    _ensure_dir(base_dir)
+    x_min, y_max = _latlon_to_tile(min_lat, min_lon, zoom)
+    x_max, y_min = _latlon_to_tile(max_lat, max_lon, zoom)
 
-    tile_files = []
+    x_start = int(math.floor(min(x_min, x_max)))
+    x_end = int(math.floor(max(x_min, x_max)))
+    y_start = int(math.floor(min(y_min, y_max)))
+    y_end = int(math.floor(max(y_min, y_max)))
 
-    for r, c, (tmin_lat, tmin_lon, tmax_lat, tmax_lon) in _tile_bounds(
-        min_lat, min_lon, max_lat, max_lon, grid_rows, grid_cols
-    ):
-        tile_name = f"tile_r{r}_c{c}.geojson"
-        tile_path = base_dir / tile_name
+    for x in range(x_start, x_end + 1):
+        for y in range(y_start, y_end + 1):
+            yield x, y
 
-        if dry_run:
-            print(f"[DRY RUN] Would fetch: r={r} c={c} bbox=({tmin_lat},{tmin_lon},{tmax_lat},{tmax_lon}) -> {tile_path}")
-            continue
 
-        print(f"Fetching r={r} c={c} …")
-        fc = _fema_query_bbox(
-            tmin_lat, tmin_lon, tmax_lat, tmax_lon, fields=fields, page_size=page_size
-        )
-        _write_geojson(tile_path, fc)
-        print(f"  saved {len(fc.get('features', []))} features → {tile_path}")
-        tile_files.append(tile_path)
+def download_vector_tile(z: int, x: int, y: int) -> bytes:
+    headers = {"x-api-key": settings.fema_api_key}
+    url = API_TILES_URL.format(z=z, x=x, y=y)
+    response = requests.get(url, headers=headers, timeout=60)
+    response.raise_for_status()
+    return response.content
 
-    if not dry_run and tile_files:
-        merged = _merge_feature_collections(tile_files)
-        merged_path = base_dir / "merged.geojson"
-        _write_geojson(merged_path, merged)
-        print(f"Merged {sum(1 for _ in merged['features'])} features → {merged_path}")
 
-    return str(base_dir)
+def _decode_tile(z: int, x: int, y: int, tile_bytes: bytes) -> List[Dict]:
+    decoded = mapbox_vector_tile.decode(tile_bytes)
+    bounds = mercantile.bounds(x, y, z)
+    west, south, east, north = bounds
 
-def main():
-    ap = argparse.ArgumentParser(description="Fetch FEMA NFHL flood zones as GeoJSON.")
-    ap.add_argument("--min-lat", type=float, required=True)
-    ap.add_argument("--min-lon", type=float, required=True)
-    ap.add_argument("--max-lat", type=float, required=True)
-    ap.add_argument("--max-lon", type=float, required=True)
-    ap.add_argument("--fields", type=str, default=",".join(DEFAULT_FIELDS),
-                    help="Comma-separated attribute list, or * for all fields.")
-    ap.add_argument("--grid-rows", type=int, default=1, help="Split bbox into N rows (tiling).")
-    ap.add_argument("--grid-cols", type=int, default=1, help="Split bbox into N cols (tiling).")
-    ap.add_argument("--page-size", type=int, default=2000, help="Records per page for pagination.")
-    ap.add_argument("--out-dir", type=str, default="data/raw/nfhl")
-    ap.add_argument("--prefix", type=str, default="bbox")
-    ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
+    features: List[Dict] = []
 
-    fields = [f.strip() for f in args.fields.split(",")] if args.fields != "*" else "*"
+    for layer_name, layer in decoded.items():
+        extent = layer.get("extent", 4096)
+        scale_x = (east - west) / extent
+        scale_y = (north - south) / extent
 
-    fetch_nfhl_bbox(
-        min_lat=args.min_lat,
-        min_lon=args.min_lon,
-        max_lat=args.max_lat,
-        max_lon=args.max_lon,
-        fields=fields,
-        grid_rows=args.grid_rows,
-        grid_cols=args.grid_cols,
-        page_size=args.page_size,
-        out_dir=args.out_dir,
-        prefix=args.prefix,
-        dry_run=args.dry_run,
-    )
+        def _project(coord_x: float, coord_y: float, coord_z: float | None = None) -> tuple[float, float]:
+            lon = west + coord_x * scale_x
+            lat = north - coord_y * scale_y
+            return lon, lat
+
+        projector = partial(_project)
+
+        for feature in layer.get("features", []):
+            geometry = shape(feature["geometry"])
+            geometry = transform(projector, geometry)
+            record = {
+                "tile_z": z,
+                "tile_x": x,
+                "tile_y": y,
+                "layer": layer_name,
+                **feature.get("properties", {}),
+                "geometry": geometry,
+            }
+            features.append(record)
+
+    return features
+
+
+def save_floodzones(zoom: int = 13) -> Path:
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    records: List[Dict] = []
+    for x, y in _generate_tile_range(settings.fema_bbox, zoom):
+        tile_bytes = download_vector_tile(zoom, x, y)
+        records.extend(_decode_tile(zoom, x, y, tile_bytes))
+        print(f"Decoded tile z={zoom}, x={x}, y={y}")
+
+    if not records:
+        print("No records retrieved from flood tiles.")
+        return OUTPUT_PATH
+
+    gdf = gpd.GeoDataFrame(records, geometry="geometry", crs="EPSG:4326")
+    gdf.to_file(OUTPUT_PATH, driver="GeoJSON")
+    print(f"Saved {len(gdf)} flood features to {OUTPUT_PATH}")
+    return OUTPUT_PATH
+
 
 if __name__ == "__main__":
-    main()
+    save_floodzones()
