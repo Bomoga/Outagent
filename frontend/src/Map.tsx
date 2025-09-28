@@ -231,58 +231,6 @@ export default function Map({ selectedMetric }: MapProps) {
               </>
             )}
           </GoogleMap>
-
-          {/* Legend */}
-          {mapReady && (
-            <div className="absolute bottom-2 left-2 bg-white p-3 rounded-lg shadow-md text-xs text-gray-800">
-              <div className="flex flex-col gap-2">
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 bg-blue-500 rounded-full inline-block"></span>
-                  <span className="font-medium">Current Data</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 border border-blue-500 rounded-full inline-block"></span>
-                  <span className="font-medium">Forecast</span>
-                </div>
-
-                {selectedMetric === "Windspeed" && (
-                  <>
-                    <div className="flex items-center gap-2 mt-1">
-                      <svg width="14" height="14" viewBox="0 0 24 24" fill="#1e3a8a">
-                        <path d="M2 12L22 12M22 12L15 5M22 12L15 19"></path>
-                      </svg>
-                      <span className="font-medium">Live Wind (direction + speed)</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <svg
-                        width="14"
-                        height="14"
-                        viewBox="0 0 24 24"
-                        fill="#3b82f6"
-                        fillOpacity="0.5"
-                      >
-                        <path d="M2 12L22 12M22 12L15 5M22 12L15 19"></path>
-                      </svg>
-                      <span className="font-medium">Predicted Wind (direction + speed)</span>
-                    </div>
-                  </>
-                )}
-
-                {selectedMetric === "Precipitation" && (
-                  <div className="flex flex-col gap-1 mt-1">
-                    <div className="flex items-center gap-2">
-                      <span className="w-4 h-0.5 bg-blue-500 inline-block"></span>
-                      <span className="font-medium">Current Precipitation</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="w-4 h-0.5 border-t-2 border-blue-500 inline-block"></span>
-                      <span className="font-medium">Forecast Precipitation</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
         </LoadScript>
       </div>
     </div>
