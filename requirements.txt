@@ -25,3 +25,4 @@ pytest-asyncio
 requests-mock
 joblib
 lightgbm
+python-dotenv

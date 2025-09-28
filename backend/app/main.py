@@ -1,3 +1,6 @@
+import asyncio
+import contextlib
+import logging
 from fastapi import FastAPI, Query, HTTPException
 from pathlib import Path
 from joblib import load
@@ -7,6 +10,8 @@ from pydantic import BaseModel
 from fastapi.responses import ORJSONResponse
 from fastapi import APIRouter
 from .weather_infer import forecast_weather
+from backend.app import ingest_hourly
+from backend.settings import get_settings
 
 
 CACHE = Path("backend/data/processed/latest/latest_features.parquet")
@@ -25,6 +30,11 @@ class Observation(BaseModel):
 
 router = APIRouter()
 app = FastAPI(default_response_class=ORJSONResponse)
+
+LOGGER = logging.getLogger(__name__)
+settings = get_settings()
+INGEST_INTERVAL_SECONDS = settings.ingest_interval_seconds
+_INGEST_TASK: asyncio.Task | None = None
 
 # Feature engineering (must match training)
 def add_time_feats(df: pd.DataFrame) -> pd.DataFrame:
@@ -113,6 +123,37 @@ def predict_next_hours(latest_row: pd.Series, hours: int) -> List[float]:
                 Xf.loc[h-1:, "roll_mean_24"] * 23/24 + yhat/24
             )
     return preds
+
+# Background ingest helpers
+async def _run_ingest_once_async() -> None:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, ingest_hourly.ingest_once)
+
+
+async def _ingest_loop() -> None:
+    while True:
+        try:
+            await _run_ingest_once_async()
+        except Exception:
+            LOGGER.exception("Hourly ingest failed")
+        await asyncio.sleep(INGEST_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def _start_ingest_loop() -> None:
+    global _INGEST_TASK
+    if _INGEST_TASK is None:
+        _INGEST_TASK = asyncio.create_task(_ingest_loop())
+
+
+@app.on_event("shutdown")
+async def _stop_ingest_loop() -> None:
+    global _INGEST_TASK
+    if _INGEST_TASK is not None:
+        _INGEST_TASK.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await _INGEST_TASK
+        _INGEST_TASK = None
 
 # Public endpoints 
 @app.get("/health")

@@ -1,14 +1,17 @@
 ## Core imports
-import os, requests
+import requests
 from pathlib import Path
 import pandas as pd
 import numpy as np
+
+from backend.settings import get_settings
 
 ## Set 'True' for debug info
 INFO_MODE = False
 
 ## US EIA API Access
-API_KEY = os.environ.get("EIA_API_KEY", "mq7cQLfepEbZ674BT2NOHHvhMs0pzbglrXM3Gdfn")
+settings = get_settings()
+API_KEY = settings.eia_api_key
 BASE_URL = "https://api.eia.gov/v2/electricity/rto/region-data/data/"
 
 FREQUENCY = "hourly"

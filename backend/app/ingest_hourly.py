@@ -1,17 +1,20 @@
-import os
 import requests
 import pandas as pd
 import numpy as np
 import math
+import logging
 from pathlib import Path
+
+from backend.settings import get_settings
 
 # -----------------------
 # CONFIG
 # -----------------------
-API_BASE     = os.getenv("OUTAGENT_API_BASE", "http://127.0.0.1:8000")
-EIA_API_KEY  = os.getenv("EIA_API_KEY", "mq7cQLfepEbZ674BT2NOHHvhMs0pzbglrXM3Gdfn")
-LAT          = float(os.getenv("WX_LAT", "26.5225"))
-LON          = float(os.getenv("WX_LON", "-81.1637"))
+settings = get_settings()
+API_BASE = settings.api_base
+EIA_API_KEY = settings.eia_api_key
+LAT = settings.wx_lat
+LON = settings.wx_lon
 
 BASE_DIR     = Path(__file__).resolve().parents[2]
 RAW_EIA      = BASE_DIR / "backend" / "data" / "processed" / "eia"  / "FPL_DEMAND_2019-01-01T00_2025-09-20T00.csv"
@@ -362,7 +365,11 @@ def interpolate_weather_at(ts: pd.Timestamp) -> dict:
 # -----------------------
 # Main
 # -----------------------
-def main():
+LOGGER = logging.getLogger(__name__)
+
+
+def ingest_once() -> bool:
+    """Run the hourly ingest pipeline once. Returns True when data was appended."""
 
     migrate_raw_eia_to_master(RAW_EIA, EIA_CSV)
     migrate_raw_nasa_to_master(RAW_NASA, WX_CSV)
@@ -370,34 +377,49 @@ def main():
     _ensure_csv(EIA_CSV, EIA_COLS)
     _ensure_csv(WX_CSV, WX_COLS)
 
-    # 1) latest EIA hour + value
     ts, load_mw = fetch_eia_latest()
 
-    # 2) weather aligned to that hour
     wx = interpolate_weather_at(ts)
     if not wx or not _all_weather_valid(wx):
-        print("Weather unavailable/invalid; skipping ingest to avoid poisoning data.")
-        return
+        LOGGER.warning("Weather unavailable or invalid for %s; skipping ingest.", ts)
+        return False
 
-    # 3) append to master CSVs
     eia_row = {"timestamp": ts.isoformat(), "load_mw": float(load_mw)}
-    wx_row  = {"timestamp": ts.isoformat(),
-               "temp_c": float(wx["temp_c"]), "rh": float(wx["rh"]),
-               "wind_mps": float(wx["wind_mps"]), "precip_mm": float(wx["precip_mm"]),
-               "ghi_kwhm2": float(wx["ghi_kwhm2"])}
+    wx_row = {
+        "timestamp": ts.isoformat(),
+        "temp_c": float(wx["temp_c"]),
+        "rh": float(wx["rh"]),
+        "wind_mps": float(wx["wind_mps"]),
+        "precip_mm": float(wx["precip_mm"]),
+        "ghi_kwhm2": float(wx["ghi_kwhm2"]),
+    }
 
     _append_row(EIA_CSV, eia_row, EIA_COLS)
-    _append_row(WX_CSV, wx_row,  WX_COLS)
+    _append_row(WX_CSV, wx_row, WX_COLS)
 
-    # 4) POST to FastAPI for immediate forecast refresh
-    payload = {"timestamp": ts.isoformat(), "load_mw": float(load_mw),
-               "temp_c": wx_row["temp_c"], "rh": wx_row["rh"],
-               "wind_mps": wx_row["wind_mps"], "precip_mm": wx_row["precip_mm"],
-               "ghi_kwhm2": wx_row["ghi_kwhm2"]}
+    payload = {
+        "timestamp": ts.isoformat(),
+        "load_mw": float(load_mw),
+        "temp_c": wx_row["temp_c"],
+        "rh": wx_row["rh"],
+        "wind_mps": wx_row["wind_mps"],
+        "precip_mm": wx_row["precip_mm"],
+        "ghi_kwhm2": wx_row["ghi_kwhm2"],
+    }
 
-    r = requests.post(f"{API_BASE}/ingest/hour", json=payload, timeout=20)
-    r.raise_for_status()
-    print("Ingested & appended:", {"ts": ts.isoformat(), "load_mw": load_mw, **wx})
+    response = requests.post(f"{API_BASE}/ingest/hour", json=payload, timeout=20)
+    response.raise_for_status()
+    LOGGER.info("Ingested hourly observation for %s", ts.isoformat())
+    return True
+
+
+def main() -> None:
+    success = ingest_once()
+    if success:
+        print("Ingest completed successfully.")
+    else:
+        print("Ingest skipped due to invalid weather data.")
+
 
 if __name__ == "__main__":
     main()
