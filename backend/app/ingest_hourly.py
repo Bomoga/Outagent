@@ -6,7 +6,6 @@ import logging
 import sys
 from pathlib import Path
 from typing import Optional
-
 from backend.settings import get_settings
 
 # -----------------------
@@ -391,9 +390,9 @@ def _try_ingest_via_app(payload: dict) -> Optional[bool]:
     Observation, ingest_hour = _DIRECT_INGEST_CACHE
     try:
         if hasattr(Observation, 'model_validate'):
-            obs = Observation.model_validate(payload)  # type: ignore[attr-defined]
+            obs = Observation.model_validate(payload)  # type: ignore[attr-defined)
         elif hasattr(Observation, 'parse_obj'):
-            obs = Observation.parse_obj(payload)  # type: ignore[attr-defined]
+            obs = Observation.parse_obj(payload)  # type: ignore[attr-defined)
         else:
             obs = Observation(**payload)
     except Exception:
@@ -442,14 +441,6 @@ def ingest_once() -> bool:
         "ghi_kwhm2": wx_row["ghi_kwhm2"],
     }
 
-    dispatched = _try_ingest_via_app(payload)
-    if dispatched is True:
-        LOGGER.info("Ingested hourly observation for %s (in-process)", ts.isoformat())
-        return True
-    if dispatched is False:
-        LOGGER.warning("Skipping ingest for %s; payload failed validation.", ts.isoformat())
-        return False
-
     response = requests.post(f"{API_BASE}/ingest/hour", json=payload, timeout=20)
     response.raise_for_status()
     LOGGER.info("Ingested hourly observation for %s", ts.isoformat())
@@ -466,4 +457,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
